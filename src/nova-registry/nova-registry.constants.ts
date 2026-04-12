@@ -1,0 +1,1 @@
+export const NOVA_REGISTRY_SDK = 'NOVA_REGISTRY_SDK';
