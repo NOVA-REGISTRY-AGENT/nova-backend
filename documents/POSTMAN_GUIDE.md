@@ -280,3 +280,430 @@ Puedes importar esta colección directamente en Postman:
 
 3. Configura el environment `Nova Registry Local` con `base_url = http://localhost:3000`.
 4. Ejecuta las requests en el orden del flujo recomendado.
+
+---
+
+---
+
+# Endpoints Soroban — Contrato Nova Registry (Interacción Directa On-Chain)
+
+Estos endpoints interactúan **directamente** con el Smart Contract desplegado en Stellar Testnet, sin pasar por el SDK de Nova Registry. Útiles para el agente IA, para verificar el estado real de la blockchain y para testing del flujo de doble firma.
+
+**Contract ID:** `CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD`  
+**Network:** Stellar Testnet  
+**Explorer:** https://stellar.expert/explorer/testnet/contract/CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD
+
+---
+
+## Variables de entorno de Soroban (agregar al Environment de Postman)
+
+Agrega estas variables en tu environment `Nova Registry Local`:
+
+| Variable          | Valor de ejemplo                                                   |
+|-------------------|--------------------------------------------------------------------|
+| `base_url`        | `http://localhost:3000`                                            |
+| `owner_address`   | `GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4`       |
+| `owner_secret`    | `SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` (solo dev) |
+| `sample_hash`     | `0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20` |
+
+---
+
+## Endpoint 1 — Información del Contrato
+
+**Método:** `GET`  
+**URL:** `{{base_url}}/soroban/info`  
+**Auth:** Ninguna  
+**Body:** Ninguno
+
+### Ejemplo de respuesta `200`:
+```json
+{
+  "contractId": "CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD",
+  "network": "testnet",
+  "explorerUrl": "https://stellar.expert/explorer/testnet/contract/CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD",
+  "functions": ["initialize", "register_hash", "get_hash_info", "get_hash_count"]
+}
+```
+
+---
+
+## Endpoint 2 — Inicializar el Contrato
+
+> ⚠️ Solo ejecutar **una vez** al desplegar el contrato. Si ya fue inicializado, la blockchain lo rechazará.
+
+**Método:** `POST`  
+**URL:** `{{base_url}}/soroban/initialize`  
+**Headers:**
+
+| Key            | Value              |
+|----------------|--------------------|
+| `Content-Type` | `application/json` |
+
+**Body (raw JSON):**
+```json
+{
+  "adminAddress": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4"
+}
+```
+
+> `adminAddress` debe ser la dirección pública derivada de `STELLAR_SECRET` configurado en el `.env`.
+
+### Respuesta exitosa `200`:
+```json
+{
+  "success": true,
+  "txHash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "message": "Contrato inicializado exitosamente"
+}
+```
+
+### Respuesta de error `400` (ya inicializado):
+```json
+{
+  "statusCode": 400,
+  "message": "Contract already initialized"
+}
+```
+
+---
+
+## Endpoint 3 — Consultar Hash (Read-Only, Gratuito)
+
+Llama a `get_hash_info(hash)` en el contrato. No requiere auth ni pago.
+
+**Método:** `GET`  
+**URL:** `{{base_url}}/soroban/hash/:hash`  
+**Auth:** Ninguna  
+**Body:** Ninguno
+
+### Ejemplo de URL:
+```
+{{base_url}}/soroban/hash/0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+```
+
+> El hash debe ser **64 caracteres hexadecimales** (32 bytes), con o sin prefijo `0x`.
+
+### Respuesta exitosa `200`:
+```json
+{
+  "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "owner": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4",
+  "timestamp": 1744329600,
+  "registeredAt": "2026-04-10T12:00:00.000Z",
+  "contractId": "CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD"
+}
+```
+
+### Respuesta `404` (hash no registrado):
+```json
+{
+  "statusCode": 404,
+  "message": "Hash no registrado: 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+}
+```
+
+---
+
+## Endpoint 4 — Contar Total de Registros (Read-Only, Gratuito)
+
+Llama a `get_hash_count()` en el contrato. No requiere auth ni pago.
+
+**Método:** `GET`  
+**URL:** `{{base_url}}/soroban/count`  
+**Auth:** Ninguna  
+**Body:** Ninguno
+
+### Respuesta exitosa `200`:
+```json
+{
+  "totalRegistered": 42,
+  "contractId": "CDNBMD3AA6QPW4SR2RSG2BO46X4SFKA6N4GLVDEGCANYTBWX57M7YNLD"
+}
+```
+
+---
+
+## Endpoint 5 — Registrar Hash en un paso (Solo DESARROLLO/DEMO)
+
+> ⚠️ **NUNCA usar en producción.** Envía el `ownerSecret` al backend directamente. Solo válido para demos y testing local.
+
+Ejecuta internamente las fases 1 y 2 del flujo de doble firma de forma automática.
+
+**Método:** `POST`  
+**URL:** `{{base_url}}/soroban/register/dev`  
+**Headers:**
+
+| Key            | Value              |
+|----------------|--------------------|
+| `Content-Type` | `application/json` |
+
+**Body (raw JSON):**
+```json
+{
+  "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "ownerAddress": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4",
+  "ownerSecret": "SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+}
+```
+
+### Respuesta exitosa `200`:
+```json
+{
+  "success": true,
+  "txHash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "explorerUrl": "https://stellar.expert/explorer/testnet/tx/a1b2c3d4...",
+  "certificate": {
+    "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "owner": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4",
+    "timestamp": 1744329600,
+    "registeredAt": "2026-04-10T12:00:00.000Z"
+  },
+  "_warning": "Endpoint solo para uso en desarrollo/testing"
+}
+```
+
+### Respuesta de error `502` (hash ya registrado):
+```json
+{
+  "statusCode": 502,
+  "message": "Simulación fallida: HostError: Error(Contract, #1)"
+}
+```
+
+> El error `#1` corresponde a `ContractError::HashAlreadyRegistered` definido en `lib.rs`.
+
+---
+
+## Endpoints 6 y 7 — Flujo de doble firma (Para Agente IA / Producción)
+
+Este es el flujo real que implementa el **Onchain Paywall** del contrato. Requiere dos llamadas.
+
+### FASE 1 — Preparar la transacción
+
+El backend simula la transacción y devuelve el `ownerAuthEntryXdr` que el owner debe firmar con su keypair Stellar.
+
+**Método:** `POST`  
+**URL:** `{{base_url}}/soroban/register/prepare`  
+**Headers:**
+
+| Key            | Value              |
+|----------------|--------------------|
+| `Content-Type` | `application/json` |
+
+**Body (raw JSON):**
+```json
+{
+  "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "ownerAddress": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4"
+}
+```
+
+### Respuesta exitosa `200`:
+```json
+{
+  "ownerAuthEntryXdr": "AAAAAQAAAAAAAAAB...base64...==",
+  "latestLedger": 1234567,
+  "expirationLedger": 1234667,
+  "instructions": "Firma ownerAuthEntryXdr con tu keypair Stellar y envíalo a POST /soroban/register/submit"
+}
+```
+
+> El agente debe usar `authorizeEntry(ownerAuthEntryXdr, ownerKeypair, expirationLedger, networkPassphrase)` del Stellar SDK para firmar.
+
+---
+
+### FASE 2 — Enviar con doble firma (x402)
+
+El backend valida el pago x402, agrega su firma de admin y hace submit a la blockchain.
+
+**Método:** `POST`  
+**URL:** `{{base_url}}/soroban/register/submit`  
+**Headers:**
+
+| Key                    | Value                                      | Descripción                             |
+|------------------------|--------------------------------------------|-----------------------------------------|
+| `Content-Type`         | `application/json`                         | Requerido                               |
+| `payment-signature`    | `base64_de_la_firma_stellar`               | Firma del challenge de pago             |
+| `x-stellar-public-key` | `GC6XSCI...`                               | Debe coincidir con `ownerAddress`       |
+| `x-payment-nonce`      | `abc123nonce`                              | Nonce del challenge de pago             |
+| `x-idempotency-key`    | `550e8400-e29b-41d4-a716-446655440000`     | UUID para idempotencia                  |
+
+**Body (raw JSON):**
+```json
+{
+  "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "ownerAddress": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4",
+  "ownerSignedAuthEntryXdr": "AAAAAQAAAAAAAAAB...base64_firmado...=="
+}
+```
+
+> `ownerSignedAuthEntryXdr` es el valor de `ownerAuthEntryXdr` de la Fase 1, firmado por el owner.
+
+### Respuesta exitosa `200`:
+```json
+{
+  "success": true,
+  "txHash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "explorerUrl": "https://stellar.expert/explorer/testnet/tx/a1b2c3d4...",
+  "certificate": {
+    "hash": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "owner": "GC6XSCIHDDZYO46E2VKCCFH7SEPGZACWO6YX4ARN7ALVACGAL2NRKIR4",
+    "timestamp": 1744329600,
+    "registeredAt": "2026-04-10T12:00:00.000Z"
+  }
+}
+```
+
+### Respuesta `402` (sin headers de pago):
+```json
+{
+  "error": "payment_required",
+  "message": "Se requiere un micropago x402 para registrar un hash en el contrato Soroban",
+  "payment": {
+    "amount": "1",
+    "asset": "XLM",
+    "network": "testnet",
+    "resource": "/soroban/register/submit",
+    "requiredHeaders": [
+      "payment-signature",
+      "x-stellar-public-key",
+      "x-payment-nonce",
+      "x-idempotency-key"
+    ]
+  }
+}
+```
+
+### Respuesta `403` (clave pública no coincide):
+```json
+{
+  "statusCode": 403,
+  "message": "La clave pública del pago no coincide con ownerAddress"
+}
+```
+
+---
+
+## Flujo completo recomendado en Postman (Soroban)
+
+### Para DESARROLLO (testing rápido):
+```
+1. GET  /soroban/count                    → verificar cuántos hashes hay
+2. GET  /soroban/hash/{hash}              → verificar si el hash ya existe (404 = no existe)
+3. POST /soroban/register/dev             → registrar en un paso con ownerSecret
+4. GET  /soroban/hash/{hash}              → confirmar que el hash quedó registrado
+```
+
+### Para PRODUCCIÓN (Agente IA / flujo x402 completo):
+```
+1. GET  /soroban/hash/{hash}              → verificar si ya está registrado
+2. POST /soroban/register/prepare         → obtener ownerAuthEntryXdr
+   ↓ (el agente firma ownerAuthEntryXdr con su keypair)
+3. POST /soroban/register/submit          → enviar con headers x402 + XDR firmado
+4. GET  /soroban/hash/{hash}              → verificar registro on-chain
+```
+
+---
+
+## Errores de contrato comunes
+
+| Código Soroban | ContractError            | Qué significa                                      |
+|----------------|--------------------------|----------------------------------------------------|
+| `#1`           | `HashAlreadyRegistered`  | El hash ya fue registrado antes (no se puede duplicar) |
+| `#2`           | `HashNotFound`           | El hash consultado no existe en el contrato        |
+
+---
+
+## Colección Postman — Soroban (importar desde JSON)
+
+Pega este JSON en **Postman → Import → Raw Text**:
+
+```json
+{
+  "info": {
+    "name": "Nova Registry — Soroban Direct",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Info del Contrato",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{base_url}}/soroban/info", "host": ["{{base_url}}"], "path": ["soroban", "info"] }
+      }
+    },
+    {
+      "name": "2. Contar Registros",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{base_url}}/soroban/count", "host": ["{{base_url}}"], "path": ["soroban", "count"] }
+      }
+    },
+    {
+      "name": "3. Consultar Hash",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/soroban/hash/{{sample_hash}}",
+          "host": ["{{base_url}}"],
+          "path": ["soroban", "hash", "{{sample_hash}}"]
+        }
+      }
+    },
+    {
+      "name": "4. Registrar Hash [DEV]",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"hash\": \"{{sample_hash}}\",\n  \"ownerAddress\": \"{{owner_address}}\",\n  \"ownerSecret\": \"{{owner_secret}}\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/soroban/register/dev", "host": ["{{base_url}}"], "path": ["soroban", "register", "dev"] }
+      }
+    },
+    {
+      "name": "5. Preparar Registro [PROD Fase 1]",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"hash\": \"{{sample_hash}}\",\n  \"ownerAddress\": \"{{owner_address}}\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/soroban/register/prepare", "host": ["{{base_url}}"], "path": ["soroban", "register", "prepare"] }
+      }
+    },
+    {
+      "name": "6. Enviar Registro [PROD Fase 2 / x402]",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "payment-signature", "value": "REEMPLAZA_CON_TU_FIRMA_BASE64" },
+          { "key": "x-stellar-public-key", "value": "{{owner_address}}" },
+          { "key": "x-payment-nonce", "value": "REEMPLAZA_CON_NONCE" },
+          { "key": "x-idempotency-key", "value": "550e8400-e29b-41d4-a716-446655440000" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"hash\": \"{{sample_hash}}\",\n  \"ownerAddress\": \"{{owner_address}}\",\n  \"ownerSignedAuthEntryXdr\": \"REEMPLAZA_CON_XDR_FIRMADO\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/soroban/register/submit", "host": ["{{base_url}}"], "path": ["soroban", "register", "submit"] }
+      }
+    },
+    {
+      "name": "7. Inicializar Contrato (solo una vez)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"adminAddress\": \"{{owner_address}}\"\n}"
+        },
+        "url": { "raw": "{{base_url}}/soroban/initialize", "host": ["{{base_url}}"], "path": ["soroban", "initialize"] }
+      }
+    }
+  ]
+}
+```
