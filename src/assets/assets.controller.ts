@@ -36,10 +36,8 @@ export class AssetsController {
       if (error instanceof NovaRegistryError) {
         throw new HttpException(error.message, error.status);
       }
-      throw new HttpException(
-        'Internal server error',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }
 
@@ -55,10 +53,8 @@ export class AssetsController {
       if (error instanceof NovaRegistryError) {
         throw new HttpException(error.message, error.status);
       }
-      throw new HttpException(
-        'Internal server error',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }
 
@@ -74,10 +70,8 @@ export class AssetsController {
       if (error instanceof NovaRegistryError) {
         throw new HttpException(error.message, error.status);
       }
-      throw new HttpException(
-        'Internal server error',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }
 
@@ -93,10 +87,8 @@ export class AssetsController {
       if (error instanceof NovaRegistryError) {
         throw new HttpException(error.message, error.status);
       }
-      throw new HttpException(
-        'Internal server error',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }
 }

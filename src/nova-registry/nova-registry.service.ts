@@ -64,8 +64,10 @@ export class NovaRegistryService {
         `[${method}] Nova Registry error ${error.status}: ${error.message}`,
         error.details,
       );
+    } else if (error instanceof Error) {
+      this.logger.error(`[${method}] Network/runtime error: ${error.message}`);
     } else {
-      this.logger.error(`[${method}] Unexpected error`, error);
+      this.logger.error(`[${method}] Unknown error`, error);
     }
     throw error;
   }
