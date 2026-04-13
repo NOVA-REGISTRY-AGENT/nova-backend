@@ -29,22 +29,36 @@ export const AUTH_ENTRY_LEDGER_OFFSET = 100;
 export const FACILITATOR_URL_DEFAULT =
   'https://dot-revealable-telescopically.ngrok-free.dev/api/v1/plugins/x402/call';
 
+/** Contrato SAC de USDC en Stellar Testnet */
+export const USDC_SAC_TESTNET =
+  'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA';
+
+/** Issuer de USDC en Stellar Testnet (asset clásico en Horizon) */
+export const USDC_ISSUER_TESTNET =
+  'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+
 /**
- * Requisitos de pago x402 que el backend publica en la respuesta 402.
- * El cliente (Agente IA / SDK) usa estos datos para construir la transacción Stellar.
+ * Contrato SAC de XLM nativo en Stellar Testnet.
+ * Derivado de: Asset.native().contractId(Networks.TESTNET)
  */
-export const REGISTRATION_PAYMENT_REQUIREMENTS = {
+export const XLM_SAC_TESTNET =
+  'CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC';
+
+/**
+ * Precio de registro expresado en notación dólar.
+ * @x402/express lo convierte internamente a unidades atómicas USDC.
+ */
+export const REGISTRATION_PRICE = '$0.10';
+
+/**
+ * Información de pago x402 v2 para display (GET /soroban/info).
+ * La configuración real del middleware está en main.ts.
+ */
+export const REGISTRATION_PAYMENT_INFO = {
   scheme: 'exact',
   network: 'stellar:testnet',
-  /** 0.5 XLM expresado en stroops (1 XLM = 10_000_000 stroops) */
-  maxAmountRequired: '5000000',
-  resource: '/soroban/register/submit',
-  description: 'Nova Registry — Registro de hash musical en Stellar blockchain',
-  mimeType: 'application/json',
-  /** Dirección del backend que recibe el pago */
+  price: REGISTRATION_PRICE,
+  asset: USDC_SAC_TESTNET,
   payTo: ADMIN_PUBLIC_KEY,
-  maxTimeoutSeconds: 300,
-  /** "native" = XLM nativo de Stellar */
-  asset: 'native',
-  extra: { areFeesSponsored: true },
+  description: 'Nova Registry — Registro de hash musical en Stellar blockchain',
 } as const;

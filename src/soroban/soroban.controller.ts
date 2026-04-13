@@ -8,16 +8,14 @@ import {
   NotFoundException,
   Param,
   Post,
-  Headers,
-  Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { SorobanService } from './soroban.service';
 import { FacilitatorService } from './facilitator.service';
+import type { TestX402PaymentResult } from './facilitator.service';
 import {
   CONTRACT_ID,
   EXPLORER_TESTNET,
-  REGISTRATION_PAYMENT_REQUIREMENTS,
+  REGISTRATION_PAYMENT_INFO,
 } from './soroban.constants';
 
 // ─── Interfaces de Request/Response ─────────────────────────────────────────
@@ -83,11 +81,13 @@ export class SorobanController {
       network: 'testnet',
       explorerUrl: EXPLORER_TESTNET,
       functions: ['initialize', 'register_hash', 'get_hash_info', 'get_hash_count'],
-      facilitator: {
-        network: REGISTRATION_PAYMENT_REQUIREMENTS.network,
-        asset: REGISTRATION_PAYMENT_REQUIREMENTS.asset,
-        maxAmountRequired: REGISTRATION_PAYMENT_REQUIREMENTS.maxAmountRequired,
-        payTo: REGISTRATION_PAYMENT_REQUIREMENTS.payTo,
+      payment: {
+        scheme: REGISTRATION_PAYMENT_INFO.scheme,
+        network: REGISTRATION_PAYMENT_INFO.network,
+        price: REGISTRATION_PAYMENT_INFO.price,
+        asset: REGISTRATION_PAYMENT_INFO.asset,
+        payTo: REGISTRATION_PAYMENT_INFO.payTo,
+        description: REGISTRATION_PAYMENT_INFO.description,
       },
     };
   }
@@ -179,25 +179,21 @@ export class SorobanController {
   /**
    * POST /soroban/register/submit
    *
-   * FASE 2: Puerta de pago x402 real con OpenZeppelin Facilitator + doble firma Soroban.
+   * FASE 2: Registro de hash con doble firma Soroban.
    *
-   * ── Flujo x402 v2 ──────────────────────────────────────────────────────────
-   *  Sin X-PAYMENT header  → 402 con X-PAYMENT-REQUIRED header + body con requisitos
-   *  Con X-PAYMENT header  →
-   *    1. Decodificar X-PAYMENT (base64 → JSON)
-   *    2. POST facilitador /verify  → valida la transacción Stellar del cliente
-   *    3. POST facilitador /settle  → liquida el pago on-chain via OpenZeppelin Relayer
-   *    4. Submit de la transacción Soroban con doble firma (owner + admin)
+   * La puerta de pago x402 es manejada completamente por paymentMiddleware
+   * (configurado en main.ts). Este handler solo se ejecuta cuando el pago
+   * ya fue verificado y liquidado por el facilitador OpenZeppelin.
    *
-   * El header X-PAYMENT contiene un JSON base64 con la transacción Stellar firmada
-   * por el owner que transfiere XLM al admin como pago por el servicio.
+   * Flujo:
+   *   paymentMiddleware → verifica payment-signature header con OZ Facilitator
+   *                     → liquida on-chain (settle) DESPUÉS que este handler responde
+   *   ↓
+   *   submitRegister   → llama al contrato Soroban con doble firma (owner + admin)
    */
   @Post('register/submit')
-  async submitRegister(
-    @Body() body: SubmitRegisterBody,
-    @Headers('x-payment') xPayment: string | undefined,
-    @Res() res: Response,
-  ) {
+  @HttpCode(HttpStatus.OK)
+  async submitRegister(@Body() body: SubmitRegisterBody) {
     if (!body.hash || !body.ownerAddress || !body.ownerSignedAuthEntryXdr) {
       throw new HttpException(
         'hash, ownerAddress y ownerSignedAuthEntryXdr son requeridos',
@@ -205,81 +201,6 @@ export class SorobanController {
       );
     }
 
-    // ── Puerta x402: sin X-PAYMENT → devolver 402 con requisitos ───────────
-    if (!xPayment) {
-      const requirements = {
-        ...REGISTRATION_PAYMENT_REQUIREMENTS,
-        resource: `${body.ownerAddress ? body.ownerAddress : 'unknown'}/soroban/register/submit`,
-      };
-
-      const paymentRequiredBody = {
-        x402Version: 2,
-        accepts: [requirements],
-        error: 'Payment Required',
-      };
-
-      const encoded = Buffer.from(JSON.stringify(paymentRequiredBody)).toString('base64');
-
-      return res
-        .status(HttpStatus.PAYMENT_REQUIRED)
-        .set('X-PAYMENT-REQUIRED', encoded)
-        .json(paymentRequiredBody);
-    }
-
-    // ── Decodificar y validar el X-PAYMENT header ───────────────────────────
-    let paymentPayload;
-    try {
-      paymentPayload = this.facilitatorService.decodeXPaymentHeader(xPayment);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'X-PAYMENT header inválido';
-      throw new HttpException(message, HttpStatus.BAD_REQUEST);
-    }
-
-    const requirements = { ...REGISTRATION_PAYMENT_REQUIREMENTS };
-
-    // ── PASO 1: Verificar pago con el facilitador OpenZeppelin ──────────────
-    let verifyResult;
-    try {
-      verifyResult = await this.facilitatorService.verify(paymentPayload, requirements);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Error al verificar el pago con el facilitador';
-      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
-    }
-
-    if (!verifyResult.isValid) {
-      throw new HttpException(
-        {
-          error: 'payment_verification_failed',
-          message: 'El facilitador rechazó el pago',
-          reason: verifyResult.invalidReason,
-        },
-        HttpStatus.PAYMENT_REQUIRED,
-      );
-    }
-
-    // ── PASO 2: Liquidar el pago on-chain ───────────────────────────────────
-    let settleResult;
-    try {
-      settleResult = await this.facilitatorService.settle(paymentPayload, requirements);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Error al liquidar el pago on-chain';
-      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
-    }
-
-    if (!settleResult.success) {
-      throw new HttpException(
-        {
-          error: 'payment_settlement_failed',
-          message: 'El facilitador no pudo liquidar el pago',
-          txHash: settleResult.txHash,
-        },
-        HttpStatus.BAD_GATEWAY,
-      );
-    }
-
-    // ── PASO 3: Registrar el hash en el contrato Soroban ────────────────────
     try {
       const result = await this.sorobanService.submitRegisterHash(
         body.hash,
@@ -287,22 +208,17 @@ export class SorobanController {
         body.ownerSignedAuthEntryXdr,
       );
 
-      return res.status(HttpStatus.OK).json({
+      return {
         success: true,
         txHash: result.txHash,
         explorerUrl: result.explorerUrl,
-        payment: {
-          settled: true,
-          paymentTxHash: settleResult.txHash,
-          networkId: settleResult.networkId,
-        },
         certificate: {
           hash: body.hash,
           owner: result.registrationInfo.owner,
           timestamp: result.registrationInfo.timestamp,
           registeredAt: new Date(result.registrationInfo.timestamp * 1000).toISOString(),
         },
-      });
+      };
     } catch (error) {
       if (error instanceof NotFoundException) {
         throw error;
@@ -418,6 +334,48 @@ export class SorobanController {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Error consultando el contador';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  /**
+   * POST /soroban/payment/test
+   *
+   * Endpoint de testing directo del flujo x402.
+   *
+   * Construye una transacción USDC usando ExactStellarScheme (SDK local
+   * @nova-registry/sdk-ts + @x402/stellar) y la envía al facilitador OZ
+   * para verificación y, opcionalmente, liquidación on-chain.
+   *
+   * Body:
+   *   ownerSecret  — Clave secreta del pagador (debe tener USDC en testnet)
+   *   settle?      — Si es true, liquida el pago on-chain (default: false)
+   *   resource?    — Recurso protegido (default: /soroban/register/submit)
+   *
+   * ⚠️  Solo para uso en desarrollo/testing — NO exponer en producción.
+   */
+  @Post('payment/test')
+  @HttpCode(HttpStatus.OK)
+  async testX402Payment(
+    @Body() body: { ownerSecret: string; settle?: boolean; resource?: string; verifyFirst?: boolean },
+  ): Promise<TestX402PaymentResult> {
+    if (!body.ownerSecret) {
+      throw new HttpException('ownerSecret es requerido', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      return await this.facilitatorService.testX402Payment(
+        body.ownerSecret,
+        body.resource,
+        body.settle ?? false,
+        body.verifyFirst ?? true,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error en el test x402';
+      if (message.includes('Saldo USDC insuficiente')) {
+        throw new HttpException(message, HttpStatus.BAD_REQUEST);
+      }
       throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }

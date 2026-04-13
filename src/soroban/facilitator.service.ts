@@ -1,5 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Keypair, hash } from '@stellar/stellar-sdk';
+import { ExactStellarScheme } from '@x402/stellar/exact/client';
+import {
+  ADMIN_PUBLIC_KEY,
+  XLM_SAC_TESTNET,
+} from './soroban.constants';
 
 // ─── Tipos del protocolo x402 v2 ─────────────────────────────────────────────
 
@@ -26,6 +32,51 @@ export interface X402PaymentPayload {
 export interface VerifyResult {
   isValid: boolean;
   invalidReason: string | null;
+}
+
+// ── Tipos x402 v2 ────────────────────────────────────────────────────────────
+
+/** Requisitos de pago x402 v2 (campo "accepted" / "paymentRequirements") */
+interface PaymentRequirementsV2 {
+  scheme: string;
+  network: string;
+  amount: string;
+  asset: string;
+  payTo: string;
+  maxTimeoutSeconds: number;
+  extra?: Record<string, unknown>;
+}
+
+interface PayerPreflight {
+  requiredAmount: string;
+  xlmBalance: string;
+  isSufficient: boolean;
+}
+
+/** PaymentPayloadV2 — lo que el cliente envía al servidor x402 */
+interface PaymentPayloadV2 {
+  x402Version: 2;
+  accepted: PaymentRequirementsV2;
+  payload: { transaction: string };
+  resource?: { url: string; description?: string; mimeType?: string };
+}
+
+/** Cuerpo que el HTTPFacilitatorClient envía a /verify y /settle */
+interface FacilitatorV2Request {
+  x402Version: 2;
+  paymentPayload: PaymentPayloadV2;
+  paymentRequirements: PaymentRequirementsV2;
+}
+
+export interface TestX402PaymentResult {
+  payerAddress: string;
+  paymentRequirements: PaymentRequirementsV2;
+  preflight: PayerPreflight;
+  verify: VerifyResult | null;
+  settle: SettleResult | null;
+  skippedSettle: boolean;
+  mode: 'verify-only' | 'verify-and-settle' | 'settle-only';
+  message: string;
 }
 
 export interface SettleResult {
@@ -80,6 +131,15 @@ export class FacilitatorService {
       .replace(/\/$/, '');
     this.apiKey = config.getOrThrow<string>('FACILITATOR_API_KEY');
     this.timeoutMs = 20_000;
+  }
+
+  private getFacilitatorHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.apiKey}`,
+      // Evita la página intermedia de ngrok (ERR_NGROK_6024) en clientes HTTP.
+      'ngrok-skip-browser-warning': 'true',
+    };
   }
 
   /**
@@ -164,10 +224,7 @@ export class FacilitatorService {
     try {
       const response = await fetch(`${this.baseUrl}/supported`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
+        headers: this.getFacilitatorHeaders(),
         signal: controller.signal,
       });
 
@@ -192,10 +249,7 @@ export class FacilitatorService {
     try {
       const response = await fetch(`${this.baseUrl}/${route}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
+        headers: this.getFacilitatorHeaders(),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -223,5 +277,183 @@ export class FacilitatorService {
       return error;
     }
     return new Error(`Error desconocido llamando a facilitador /${route}`);
+  }
+
+  // ─── Test directo x402 ──────────────────────────────────────────────────────
+
+  /**
+   * Construye un pago x402 v2 real usando ExactStellarScheme y lo envía
+   * al facilitador OZ con el formato correcto:
+   *   POST /verify → { x402Version, paymentPayload, paymentRequirements }
+   *
+    * @param ownerSecret  - Clave secreta Stellar del pagador (debe tener USDC)
+   * @param resource     - Recurso protegido (por defecto: /soroban/register/submit)
+   * @param doSettle     - Si es true, liquida el pago on-chain tras verificar
+   */
+  async testX402Payment(
+    ownerSecret: string,
+    resource = '/soroban/register/submit',
+    doSettle = false,
+    verifyFirst = true,
+  ): Promise<TestX402PaymentResult> {
+    const keypair = Keypair.fromSecret(ownerSecret);
+    this.logger.log(`[testX402] Iniciando pago x402 con payerAddress=${keypair.publicKey()}`);
+
+    // ── Requisitos v2 (sin resource/description/mimeType — solo los campos v2) ─
+    const reqs: PaymentRequirementsV2 = {
+      scheme: 'exact',
+      network: 'stellar:testnet',
+      amount: '1000000', // 0.10 XLM en stroops (7 decimales: 0.10 × 10^7)
+      asset: XLM_SAC_TESTNET,
+      payTo: ADMIN_PUBLIC_KEY,
+      maxTimeoutSeconds: 300,
+      extra: { areFeesSponsored: true },
+    };
+
+    const requiredAmount = Number(reqs.amount) / 1e7;
+    const xlmBalance = await this.getXlmBalance(keypair.publicKey());
+    const preflight: PayerPreflight = {
+      requiredAmount: requiredAmount.toFixed(7),
+      xlmBalance: xlmBalance.toFixed(7),
+      isSufficient: xlmBalance >= requiredAmount,
+    };
+
+    if (!preflight.isSufficient) {
+      throw new Error(
+        `Saldo XLM insuficiente para pago x402. Requerido: ${preflight.requiredAmount} XLM, disponible: ${preflight.xlmBalance} XLM en ${keypair.publicKey()}`,
+      );
+    }
+
+    // ── Signer compatible con ExactStellarScheme (cliente @x402/stellar) ────
+    const signer = {
+      address: keypair.publicKey(),
+      signAuthEntry: async (authEntryXdr: string) => {
+        const signedAuthEntry = keypair
+          .sign(hash(Buffer.from(authEntryXdr, 'base64')))
+          .toString('base64');
+        return { signedAuthEntry, signerAddress: keypair.publicKey() };
+      },
+    };
+
+    // ── Construir transacción con ExactStellarScheme ─────────────────────────
+    this.logger.log('[testX402] Construyendo transacción USDC con ExactStellarScheme...');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scheme = new ExactStellarScheme(signer as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const partial = await (scheme as any).createPaymentPayload(2, reqs) as {
+      x402Version: number;
+      payload: { transaction: string };
+    };
+
+    // ── Construir PaymentPayloadV2 con el campo "accepted" ───────────────────
+    const paymentPayloadV2: PaymentPayloadV2 = {
+      x402Version: 2,
+      accepted: reqs,
+      payload: partial.payload,
+      resource: { url: resource, mimeType: 'application/json' },
+    };
+
+    // ── Cuerpo correcto para el facilitador OZ v2 ────────────────────────────
+    const facilitatorBody: FacilitatorV2Request = {
+      x402Version: 2,
+      paymentPayload: paymentPayloadV2,
+      paymentRequirements: reqs,
+    };
+
+    // ── Verificar con el facilitador (opcional) ─────────────────────────────
+    let verifyResult: VerifyResult | null = null;
+    if (verifyFirst) {
+      this.logger.log('[testX402] Verificando pago con el facilitador...');
+      verifyResult = await this.callFacilitatorV2<VerifyResult>('verify', facilitatorBody);
+      this.logger.log(`[testX402] verify → isValid=${verifyResult.isValid} reason=${verifyResult.invalidReason}`);
+    }
+
+    // ── Liquidar (solo si se pide y la verificación fue exitosa) ─────────────
+    let settleResult: SettleResult | null = null;
+    if (doSettle && (!verifyFirst || verifyResult?.isValid)) {
+      this.logger.log('[testX402] Liquidando pago on-chain...');
+      settleResult = await this.callFacilitatorV2<SettleResult>('settle', facilitatorBody);
+      this.logger.log(`[testX402] settle → success=${settleResult.success}, txHash=${settleResult.txHash}`);
+    }
+
+    const mode: 'verify-only' | 'verify-and-settle' | 'settle-only' =
+      doSettle ? (verifyFirst ? 'verify-and-settle' : 'settle-only') : 'verify-only';
+
+    return {
+      payerAddress: keypair.publicKey(),
+      paymentRequirements: reqs,
+      preflight,
+      verify: verifyResult,
+      settle: settleResult,
+      skippedSettle: !doSettle,
+      mode,
+      message: doSettle
+        ? (settleResult?.success ? 'Pago liquidado on-chain exitosamente' : 'Pago verificado pero falló la liquidación')
+        : (verifyResult?.isValid
+          ? 'Pago verificado (settle omitido — pasa settle=true para liquidar)'
+          : `Pago inválido en verify: ${verifyResult?.invalidReason ?? 'desconocido'}`),
+    };
+  }
+
+  /** Llama al facilitador OZ con el formato correcto para x402 v2 */
+  private async callFacilitatorV2<T>(
+    route: 'verify' | 'settle',
+    body: FacilitatorV2Request,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${this.baseUrl}/${route}`, {
+        method: 'POST',
+        headers: this.getFacilitatorHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`Facilitador /${route} respondió ${response.status}: ${text}`);
+      }
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        throw new Error(`Facilitador /${route} respondió ${response.status}: ${text}`);
+      }
+    } catch (error) {
+      throw this.normalizeError(error, route);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async getXlmBalance(address: string): Promise<number> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(
+        `https://horizon-testnet.stellar.org/accounts/${address}`,
+        {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+        },
+      );
+
+      if (!response.ok) {
+        return 0;
+      }
+
+      const data = await response.json() as {
+        balances?: Array<{ asset_type?: string; balance?: string }>;
+      };
+
+      const xlm = data.balances?.find((b) => b.asset_type === 'native')?.balance;
+      return Number(xlm ?? '0');
+    } catch {
+      return 0;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 }

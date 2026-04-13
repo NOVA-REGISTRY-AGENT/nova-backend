@@ -26,6 +26,9 @@
     "@nestjs/platform-express": "^11.0.1",
     "@nova-registry/sdk-ts": "file:../nova-sdk",
     "@stellar/stellar-sdk": "^13.3.0",
+    "@x402/core": "^2.9.0",
+    "@x402/express": "^2.9.0",
+    "@x402/stellar": "^2.9.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
