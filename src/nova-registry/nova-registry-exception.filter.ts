@@ -4,7 +4,7 @@ import {
   ExceptionFilter,
   HttpStatus,
 } from '@nestjs/common';
-import { NovaRegistryError } from '@nova-registry/sdk-ts';
+import { NovaRegistryError } from './sdk/index.js';
 import { Response } from 'express';
 
 @Catch(NovaRegistryError)

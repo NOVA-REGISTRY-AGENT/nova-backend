@@ -7,7 +7,7 @@ import {
   Param,
   Post,
 } from '@nestjs/common';
-import { NovaRegistryError } from '@nova-registry/sdk-ts';
+import { NovaRegistryError } from '../nova-registry/sdk/index.js';
 import { NovaRegistryService } from '../nova-registry/nova-registry.service';
 
 interface RegisterAssetBody {

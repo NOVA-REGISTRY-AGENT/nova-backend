@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { NovaRegistrySDK } from '@nova-registry/sdk-ts';
+import { NovaRegistrySDK } from './sdk/index.js';
 import { NovaRegistryService } from './nova-registry.service';
 import { NOVA_REGISTRY_SDK } from './nova-registry.constants';
 

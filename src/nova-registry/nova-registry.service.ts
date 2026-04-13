@@ -6,7 +6,7 @@ import {
   RegisterAcceptedResponse,
   RegisterAssetInput,
   RegisterStatusResponse,
-} from '@nova-registry/sdk-ts';
+} from './sdk/index.js';
 import { NOVA_REGISTRY_SDK } from './nova-registry.constants';
 
 @Injectable()
