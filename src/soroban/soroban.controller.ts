@@ -9,9 +9,16 @@ import {
   Param,
   Post,
   Headers,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { SorobanService } from './soroban.service';
-import { CONTRACT_ID, EXPLORER_TESTNET } from './soroban.constants';
+import { FacilitatorService } from './facilitator.service';
+import {
+  CONTRACT_ID,
+  EXPLORER_TESTNET,
+  REGISTRATION_PAYMENT_REQUIREMENTS,
+} from './soroban.constants';
 
 // ─── Interfaces de Request/Response ─────────────────────────────────────────
 
@@ -45,26 +52,25 @@ interface DevRegisterBody {
   ownerSecret: string;
 }
 
-// ─── Constante interna de pago x402 ──────────────────────────────────────────
-
-const PAYMENT_AMOUNT = '1';
-const PAYMENT_ASSET = 'XLM';
-
 /**
  * Controlador Soroban — Expone los 4 métodos del contrato Nova Registry
  *
  * Endpoints:
+ *  GET    /soroban/info                      — Info del contrato desplegado
+ *  GET    /soroban/count                     — get_hash_count (read-only, gratuito)
+ *  GET    /soroban/hash/:hash                — get_hash_info (read-only, gratuito)
+ *  GET    /soroban/facilitator/supported     — payment kinds del facilitador OZ
  *  POST   /soroban/initialize                — Inicializa el contrato (una sola vez)
  *  POST   /soroban/register/prepare          — Fase 1: obtiene el auth entry para el owner
- *  POST   /soroban/register/submit           — Fase 2: submite con auth del owner firmado (x402)
+ *  POST   /soroban/register/submit           — Fase 2: pago x402 (OZ Facilitator) + doble firma
  *  POST   /soroban/register/dev              — Registro en un solo paso (solo para testing)
- *  GET    /soroban/hash/:hash                — get_hash_info (read-only, gratuito)
- *  GET    /soroban/count                     — get_hash_count (read-only, gratuito)
- *  GET    /soroban/info                      — Info del contrato desplegado
  */
 @Controller('soroban')
 export class SorobanController {
-  constructor(private readonly sorobanService: SorobanService) {}
+  constructor(
+    private readonly sorobanService: SorobanService,
+    private readonly facilitatorService: FacilitatorService,
+  ) {}
 
   /**
    * GET /soroban/info
@@ -77,7 +83,29 @@ export class SorobanController {
       network: 'testnet',
       explorerUrl: EXPLORER_TESTNET,
       functions: ['initialize', 'register_hash', 'get_hash_info', 'get_hash_count'],
+      facilitator: {
+        network: REGISTRATION_PAYMENT_REQUIREMENTS.network,
+        asset: REGISTRATION_PAYMENT_REQUIREMENTS.asset,
+        maxAmountRequired: REGISTRATION_PAYMENT_REQUIREMENTS.maxAmountRequired,
+        payTo: REGISTRATION_PAYMENT_REQUIREMENTS.payTo,
+      },
     };
+  }
+
+  /**
+   * GET /soroban/facilitator/supported
+   * Consulta al facilitador de OpenZeppelin qué payment kinds acepta.
+   * Útil para el agente IA y para debug.
+   */
+  @Get('facilitator/supported')
+  async getFacilitatorSupported() {
+    try {
+      return await this.facilitatorService.getSupported();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error conectando al facilitador';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
+    }
   }
 
   /**
@@ -151,22 +179,24 @@ export class SorobanController {
   /**
    * POST /soroban/register/submit
    *
-   * FASE 2: Puerta de pago x402 + Submit con doble firma.
+   * FASE 2: Puerta de pago x402 real con OpenZeppelin Facilitator + doble firma Soroban.
    *
-   * Flujo x402:
-   *  - Sin headers de pago → devuelve 402 con instrucciones
-   *  - Con `payment-signature` header válido → procede al registro on-chain
+   * ── Flujo x402 v2 ──────────────────────────────────────────────────────────
+   *  Sin X-PAYMENT header  → 402 con X-PAYMENT-REQUIRED header + body con requisitos
+   *  Con X-PAYMENT header  →
+   *    1. Decodificar X-PAYMENT (base64 → JSON)
+   *    2. POST facilitador /verify  → valida la transacción Stellar del cliente
+   *    3. POST facilitador /settle  → liquida el pago on-chain via OpenZeppelin Relayer
+   *    4. Submit de la transacción Soroban con doble firma (owner + admin)
    *
-   * El backend firma como admin (source account), el owner ya firmó su auth entry.
+   * El header X-PAYMENT contiene un JSON base64 con la transacción Stellar firmada
+   * por el owner que transfiere XLM al admin como pago por el servicio.
    */
   @Post('register/submit')
-  @HttpCode(HttpStatus.OK)
   async submitRegister(
     @Body() body: SubmitRegisterBody,
-    @Headers('payment-signature') paymentSignature: string | undefined,
-    @Headers('x-stellar-public-key') stellarPublicKey: string | undefined,
-    @Headers('x-payment-nonce') paymentNonce: string | undefined,
-    @Headers('x-idempotency-key') idempotencyKey: string | undefined,
+    @Headers('x-payment') xPayment: string | undefined,
+    @Res() res: Response,
   ) {
     if (!body.hash || !body.ownerAddress || !body.ownerSignedAuthEntryXdr) {
       throw new HttpException(
@@ -175,38 +205,81 @@ export class SorobanController {
       );
     }
 
-    // ── Puerta de pago x402 ────────────────────────────────────────────────
-    if (!paymentSignature || !stellarPublicKey || !paymentNonce) {
+    // ── Puerta x402: sin X-PAYMENT → devolver 402 con requisitos ───────────
+    if (!xPayment) {
+      const requirements = {
+        ...REGISTRATION_PAYMENT_REQUIREMENTS,
+        resource: `${body.ownerAddress ? body.ownerAddress : 'unknown'}/soroban/register/submit`,
+      };
+
+      const paymentRequiredBody = {
+        x402Version: 2,
+        accepts: [requirements],
+        error: 'Payment Required',
+      };
+
+      const encoded = Buffer.from(JSON.stringify(paymentRequiredBody)).toString('base64');
+
+      return res
+        .status(HttpStatus.PAYMENT_REQUIRED)
+        .set('X-PAYMENT-REQUIRED', encoded)
+        .json(paymentRequiredBody);
+    }
+
+    // ── Decodificar y validar el X-PAYMENT header ───────────────────────────
+    let paymentPayload;
+    try {
+      paymentPayload = this.facilitatorService.decodeXPaymentHeader(xPayment);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'X-PAYMENT header inválido';
+      throw new HttpException(message, HttpStatus.BAD_REQUEST);
+    }
+
+    const requirements = { ...REGISTRATION_PAYMENT_REQUIREMENTS };
+
+    // ── PASO 1: Verificar pago con el facilitador OpenZeppelin ──────────────
+    let verifyResult;
+    try {
+      verifyResult = await this.facilitatorService.verify(paymentPayload, requirements);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error al verificar el pago con el facilitador';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
+    }
+
+    if (!verifyResult.isValid) {
       throw new HttpException(
         {
-          error: 'payment_required',
-          message:
-            'Se requiere un micropago x402 para registrar un hash en el contrato Soroban',
-          payment: {
-            amount: PAYMENT_AMOUNT,
-            asset: PAYMENT_ASSET,
-            network: 'testnet',
-            resource: '/soroban/register/submit',
-            requiredHeaders: [
-              'payment-signature',
-              'x-stellar-public-key',
-              'x-payment-nonce',
-              'x-idempotency-key',
-            ],
-          },
+          error: 'payment_verification_failed',
+          message: 'El facilitador rechazó el pago',
+          reason: verifyResult.invalidReason,
         },
         HttpStatus.PAYMENT_REQUIRED,
       );
     }
 
-    // ── Validación básica de coherencia del pago ───────────────────────────
-    if (stellarPublicKey !== body.ownerAddress) {
+    // ── PASO 2: Liquidar el pago on-chain ───────────────────────────────────
+    let settleResult;
+    try {
+      settleResult = await this.facilitatorService.settle(paymentPayload, requirements);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Error al liquidar el pago on-chain';
+      throw new HttpException(message, HttpStatus.BAD_GATEWAY);
+    }
+
+    if (!settleResult.success) {
       throw new HttpException(
-        'La clave pública del pago no coincide con ownerAddress',
-        HttpStatus.FORBIDDEN,
+        {
+          error: 'payment_settlement_failed',
+          message: 'El facilitador no pudo liquidar el pago',
+          txHash: settleResult.txHash,
+        },
+        HttpStatus.BAD_GATEWAY,
       );
     }
 
+    // ── PASO 3: Registrar el hash en el contrato Soroban ────────────────────
     try {
       const result = await this.sorobanService.submitRegisterHash(
         body.hash,
@@ -214,23 +287,28 @@ export class SorobanController {
         body.ownerSignedAuthEntryXdr,
       );
 
-      return {
+      return res.status(HttpStatus.OK).json({
         success: true,
         txHash: result.txHash,
         explorerUrl: result.explorerUrl,
+        payment: {
+          settled: true,
+          paymentTxHash: settleResult.txHash,
+          networkId: settleResult.networkId,
+        },
         certificate: {
           hash: body.hash,
           owner: result.registrationInfo.owner,
           timestamp: result.registrationInfo.timestamp,
           registeredAt: new Date(result.registrationInfo.timestamp * 1000).toISOString(),
         },
-      };
+      });
     } catch (error) {
       if (error instanceof NotFoundException) {
         throw error;
       }
       const message =
-        error instanceof Error ? error.message : 'Error enviando la transacción';
+        error instanceof Error ? error.message : 'Error enviando la transacción Soroban';
       throw new HttpException(message, HttpStatus.BAD_GATEWAY);
     }
   }
