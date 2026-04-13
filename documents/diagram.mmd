@@ -1,0 +1,41 @@
+sequenceDiagram
+    participant Client
+    participant Controller as POST /soroban/payment/test
+    participant FacilitatorService
+    participant Horizon as Horizon Testnet
+    participant ExactScheme as ExactStellarScheme<br/>(@x402/stellar)
+    participant OZRelayer as OZ Relayer<br/>(ngrok facilitator)
+
+    Client->>Controller: POST { ownerSecret, settle?, verifyFirst?, resource? }
+
+    Controller->>FacilitatorService: testX402Payment(ownerSecret, resource, settle, verifyFirst)
+
+    Note over FacilitatorService: Build PaymentRequirements v2<br/>scheme=exact, network=stellar:testnet<br/>amount=0.1 XLM, asset=XLM_SAC
+
+    FacilitatorService->>Horizon: GET /accounts/{payerAddress}
+    Horizon-->>FacilitatorService: balances[]
+
+    alt XLM balance < 0.1
+        FacilitatorService-->>Controller: Error: Insufficient XLM balance
+        Controller-->>Client: 400 Bad Request
+    end
+
+    Note over FacilitatorService: Create Keypair signer<br/>signAuthEntry → ECDSA sign(hash(xdr))
+
+    FacilitatorService->>ExactScheme: createPaymentPayload(v2, requirements)
+    ExactScheme-->>FacilitatorService: { x402Version, payload: { transaction: xdr } }
+
+    Note over FacilitatorService: Wrap into PaymentPayloadV2<br/>{ x402Version:2, accepted, payload, resource }
+
+    alt verifyFirst = true
+        FacilitatorService->>OZRelayer: POST /verify<br/>{ x402Version:2, paymentPayload, paymentRequirements }
+        OZRelayer-->>FacilitatorService: { isValid, invalidReason? }
+    end
+
+    alt settle = true AND (isValid OR verifyFirst = false)
+        FacilitatorService->>OZRelayer: POST /settle<br/>{ x402Version:2, paymentPayload, paymentRequirements }
+        OZRelayer-->>FacilitatorService: { success, txHash, networkId }
+    end
+
+    FacilitatorService-->>Controller: TestX402PaymentResult
+    Controller-->>Client: 200 { payerAddress, preflight, verify, settle, mode, message }
